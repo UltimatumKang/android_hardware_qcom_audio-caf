@@ -36,7 +36,9 @@
 #ifdef QCOM_ACDB_ENABLED
 #include <linux/msm_audio_acdb.h>
 #endif
+#ifdef QCOM_VOIP_ENABLED
 #include <linux/msm_audio_mvs.h>
+#endif
 #include <sys/mman.h>
 #include "control.h"
 #include "acdb.h"
@@ -1178,7 +1180,7 @@ AudioStreamIn* AudioHardware::openInputStream(
 
     mLock.lock();
 #ifdef QCOM_VOIP_ENABLED
-    if(devices == AudioSystem::DEVICE_IN_COMMUNICATION) {
+    if((devices == AudioSystem::DEVICE_IN_COMMUNICATION) && (*sampleRate <= AUDIO_HW_VOIP_SAMPLERATE_16K)) {
         ALOGE("Create Audio stream Voip \n");
         AudioStreamInVoip* inVoip = new AudioStreamInVoip();
         status_t lStatus = NO_ERROR;
@@ -1523,22 +1525,24 @@ size_t AudioHardware::getInputBufferSize(uint32_t sampleRate, int format, int ch
         return 0;
     }
 
-    if (sampleRate == 8000) {
-       return 320*channelCount;
-    } else if (sampleRate == 16000){
-       return 640*channelCount;
-    } else {
-        /*
-            Return pcm record buffer size based on the sampling rate:
-            If sampling rate >= 44.1 Khz, use 512 samples/channel pcm recording and
-            If sampling rate < 44.1 Khz, use 256 samples/channel pcm recording
-        */
-       if(sampleRate >= 44100){
-           return 1024*channelCount;
-       } else {
-           return 512*channelCount;
-       }
+    size_t bufferSize = 0;
+
+    if (sampleRate == 8000 || sampleRate == 16000 || sampleRate == 32000) {
+       bufferSize = (sampleRate * channelCount * 20 * sizeof(int16_t)) / 1000;
     }
+    else if (sampleRate == 11025 || sampleRate == 12000) {
+       bufferSize = 256 * sizeof(int16_t) * channelCount;
+    }
+    else if (sampleRate == 22050 || sampleRate == 24000) {
+       bufferSize = 512 * sizeof(int16_t) * channelCount;
+    }
+    else if (sampleRate == 44100 || sampleRate == 48000) {
+       bufferSize = 1024 * sizeof(int16_t) * channelCount;
+    }
+
+    ALOGD("getInputBufferSize: sampleRate: %d channelCount: %d bufferSize: %d", sampleRate, channelCount, bufferSize);
+
+    return bufferSize;
 }
 
 static status_t set_volume_rpc(uint32_t device,
@@ -1869,7 +1873,7 @@ static status_t do_route_audio_rpc(uint32_t device,
         ALOGI("In SPEAKER_TX cur_rx = %d\n", cur_rx);
     }
 #ifdef SAMSUNG_AUDIO
-#if 0
+#ifdef USE_SAMSUNG_VOIP_DEVICE
     else if (device == SND_DEVICE_VOIP_HANDSET) {
         new_rx_device = DEVICE_HANDSET_VOIP_RX;
         new_tx_device = DEVICE_HANDSET_VOIP_TX;
@@ -2410,6 +2414,18 @@ status_t AudioHardware::doRouting(AudioStreamInMSM8x60 *input)
                     sndDevice = SND_DEVICE_ANC_HEADSET;
                 }
 #endif
+#ifdef USE_SAMSUNG_VOIP_DEVICE
+            else if (isStreamOnAndActive(VOIP_CALL)) {
+                if (outputDevices & AudioSystem::DEVICE_OUT_EARPIECE) {
+                        ALOGD("Routing audio to VOIP handset\n");
+                        sndDevice = SND_DEVICE_VOIP_HANDSET;
+                }
+                else if (outputDevices & AudioSystem::DEVICE_OUT_SPEAKER) {
+                        ALOGD("Routing audio to VOIP speaker\n");
+                        sndDevice = SND_DEVICE_VOIP_HANDSET;
+                }
+            }
+#endif
             else if (isStreamOnAndActive(PCM_PLAY)
 #ifdef QCOM_TUNNEL_LPA_ENABLED
                      || isStreamOnAndActive(LPA_DECODE)
@@ -2527,9 +2543,25 @@ status_t AudioHardware::doRouting(AudioStreamInMSM8x60 *input)
         }
 #endif
           else if (outputDevices & AudioSystem::DEVICE_OUT_SPEAKER) {
+#ifdef SAMSUNG_AUDIO
+            if (mMode == AudioSystem::MODE_IN_CALL) {
+              ALOGD("Routing audio to Call Speaker\n");
+              sndDevice = SND_DEVICE_CALL_SPEAKER;
+            }
+#ifdef USE_SAMSUNG_VOIP_DEVICE
+            else if (mMode == AudioSystem::MODE_IN_COMMUNICATION) {
+              ALOGD("Routing audio to VOIP speaker\n");
+              sndDevice = SND_DEVICE_VOIP_SPEAKER;
+            }
+#endif
+            else {
+#endif
             ALOGI("Routing audio to Speakerphone\n");
             sndDevice = SND_DEVICE_SPEAKER;
             audProcess = (ADRC_ENABLE | EQ_ENABLE | RX_IIR_ENABLE | MBADRC_ENABLE);
+#ifdef SAMSUNG_AUDIO
+            }
+#endif
         } else
 #ifdef QCOM_FM_ENABLED
          if (outputDevices & AudioSystem::DEVICE_OUT_FM_TX){
@@ -2539,19 +2571,36 @@ status_t AudioHardware::doRouting(AudioStreamInMSM8x60 *input)
         } else
 #endif
           if(outputDevices & AudioSystem::DEVICE_OUT_EARPIECE){
+#ifdef SAMSUNG_AUDIO
+            if (mMode == AudioSystem::MODE_IN_CALL) {
+              if (dualmic_enabled) {
+                ALOGI("Routing audio to Handset with DualMike enabled\n");
+                sndDevice = SND_DEVICE_IN_S_SADC_OUT_HANDSET;
+              }
+              else {
+                ALOGD("Routing audio to Call Handset\n");
+                sndDevice = SND_DEVICE_CALL_HANDSET;
+              }
+            }
+#ifdef USE_SAMSUNG_VOIP_DEVICE
+            else if (mMode == AudioSystem::MODE_IN_COMMUNICATION) {
+              ALOGD("Routing audio to VOIP handset\n");
+              sndDevice = SND_DEVICE_VOIP_HANDSET;
+            }
+#endif
+            else {
+#endif
             ALOGI("Routing audio to Handset\n");
             sndDevice = SND_DEVICE_HANDSET;
             audProcess = (ADRC_ENABLE | EQ_ENABLE | RX_IIR_ENABLE | MBADRC_ENABLE);
+#ifdef SAMSUNG_AUDIO
+            }
+#endif
         }
     }
 
+#ifndef SAMSUNG_AUDIO
     if (dualmic_enabled) {
-#ifdef SAMSUNG_AUDIO
-        if (sndDevice == SND_DEVICE_HANDSET) {
-            ALOGI("Routing audio to Handset with DualMike enabled\n");
-            sndDevice = SND_DEVICE_IN_S_SADC_OUT_HANDSET;
-        }
-#else
         if (sndDevice == SND_DEVICE_HANDSET) {
             ALOGI("Routing audio to Handset with DualMike enabled\n");
             sndDevice = SND_DEVICE_IN_S_SADC_OUT_HANDSET;
@@ -2559,33 +2608,17 @@ status_t AudioHardware::doRouting(AudioStreamInMSM8x60 *input)
             ALOGI("Routing audio to Speakerphone with DualMike enabled\n");
             sndDevice = SND_DEVICE_IN_S_SADC_OUT_SPEAKER_PHONE;
         }
-#endif
     }
+#endif
 
 #ifdef SAMSUNG_AUDIO
-    if (mMode == AudioSystem::MODE_IN_CALL) {
-        if ((!dualmic_enabled) && (sndDevice == SND_DEVICE_HANDSET)) {
-            ALOGD("Routing audio to Call Handset\n");
-            sndDevice = SND_DEVICE_CALL_HANDSET;
-        } else if (sndDevice == SND_DEVICE_SPEAKER) {
-            ALOGD("Routing audio to Call Speaker\n");
-            sndDevice = SND_DEVICE_CALL_SPEAKER;
-        } else if (sndDevice == SND_DEVICE_HEADSET) {
+    if ((mMode == AudioSystem::MODE_IN_CALL) && (sndDevice == SND_DEVICE_HEADSET)) {
             ALOGD("Routing audio to Call Headset\n");
             sndDevice = SND_DEVICE_CALL_HEADSET;
-        }
-#if 0
-    } else if (mMode == AudioSystem::MODE_IN_COMMUNICATION) {
-        if (sndDevice == SND_DEVICE_HANDSET) {
-            ALOGD("Routing audio to VOIP handset\n");
-            sndDevice = SND_DEVICE_VOIP_HANDSET;
-        } else if (sndDevice == SND_DEVICE_SPEAKER) {
-            ALOGD("Routing audio to VOIP speaker\n");
-            sndDevice = SND_DEVICE_VOIP_SPEAKER;
-        } else if (sndDevice == SND_DEVICE_HEADSET) {
+#ifdef USE_SAMSUNG_VOIP_DEVICE
+    } else if ((mMode == AudioSystem::MODE_IN_COMMUNICATION) && (sndDevice == SND_DEVICE_HEADSET)) {
             ALOGD("Routing audio to VOIP headset\n");
             sndDevice = SND_DEVICE_VOIP_HEADSET;
-        }
 #endif
     }
 #endif
@@ -5091,10 +5124,10 @@ status_t AudioHardware::AudioStreamInVoip::set(
     mFormat =  *pFormat;
     mChannels = *pChannels;
     mSampleRate = *pRate;
-    if(mSampleRate == 8000)
-       mBufferSize = 320;
-    else if(mSampleRate == 16000)
-       mBufferSize = 640;
+    if(mSampleRate == AUDIO_HW_VOIP_SAMPLERATE_8K)
+       mBufferSize = AUDIO_HW_VOIP_BUFFERSIZE_8K;
+    else if(mSampleRate == AUDIO_HW_VOIP_SAMPLERATE_16K)
+       mBufferSize = AUDIO_HW_VOIP_BUFFERSIZE_16K;
     else
     {
        ALOGE(" unsupported sample rate");

@@ -460,9 +460,12 @@ status_t AudioHardwareALSA::setVoiceVolume(float v)
     vol = 100 - vol;
 
     if (mALSADevice) {
-        if(newMode == AUDIO_MODE_IN_COMMUNICATION) {
-            mALSADevice->setVoipVolume(vol);
-        } else if (newMode == AUDIO_MODE_IN_CALL){
+        /* Check for MODE_IN_COMMUNICATION is removed as Direct Output is used
+	 * for voicemail cases where stream is opened without any mode set or
+	 * mode set to IN_CALL and user still expect volume to be updated for
+	 * direct output stream */
+        mALSADevice->setVoipVolume(vol);
+        if (newMode == AUDIO_MODE_IN_CALL) {
                if (mCSCallActive == CS_ACTIVE)
                    mALSADevice->setVoiceVolume(vol);
                else if (mVoice2CallActive == CS_ACTIVE_SESSION2)
@@ -1846,7 +1849,6 @@ AudioHardwareALSA::openInputStream(uint32_t devices,
             {
             route_devices = devices | mCurDevice;
             }
-            mALSADevice->route(&(*it), route_devices, mode());
         } else {
 #ifdef QCOM_USBAUDIO_ENABLED
             if(devices & AudioSystem::DEVICE_IN_ANLG_DOCK_HEADSET ||
@@ -1908,18 +1910,12 @@ AudioHardwareALSA::openInputStream(uint32_t devices,
             }
         }
 #endif
-        err = mALSADevice->open(&(*it));
         if (*format == AUDIO_FORMAT_AMR_WB) {
              ALOGV("### Setting bufsize to 61");
              it->bufferSize = 61;
         }
-        if (err) {
-           ALOGE("Error opening pcm input device");
-           mDeviceList.erase(it);
-        } else {
-           in = new AudioStreamInALSA(this, &(*it), acoustics);
-           err = in->set(format, channels, sampleRate, devices);
-        }
+        in = new AudioStreamInALSA(this, &(*it), acoustics);
+        err = in->set(format, channels, sampleRate, devices);
         if (status) *status = err;
         return in;
       }
